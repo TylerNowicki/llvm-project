@@ -16,22 +16,19 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/Endian.h"
 #include <cstdint>
 
 using namespace llvm;
+using namespace support;
 
 #define DEBUG_TYPE "llvm-siphash"
 
-// Lightly adapted from the SipHash reference C implementation by
-// Jean-Philippe Aumasson and Daniel J. Bernstein.
+// Lightly adapted from the SipHash reference C implementation:
+//   https://github.com/veorq/SipHash
+// by Jean-Philippe Aumasson and Daniel J. Bernstein
 
 #define ROTL(x, b) (uint64_t)(((x) << (b)) | ((x) >> (64 - (b))))
-
-#define U8TO64_LE(p)                                                           \
-  (((uint64_t)((p)[0])) | ((uint64_t)((p)[1]) << 8) |                          \
-   ((uint64_t)((p)[2]) << 16) | ((uint64_t)((p)[3]) << 24) |                   \
-   ((uint64_t)((p)[4]) << 32) | ((uint64_t)((p)[5]) << 40) |                   \
-   ((uint64_t)((p)[6]) << 48) | ((uint64_t)((p)[7]) << 56))
 
 #define SIPROUND                                                               \
   do {                                                                         \
@@ -51,21 +48,30 @@ using namespace llvm;
     v2 = ROTL(v2, 32);                                                         \
   } while (0)
 
-template <int cROUNDS, int dROUNDS, class ResultTy>
-static inline ResultTy siphash(const unsigned char *in, uint64_t inlen,
-                               const unsigned char (&k)[16]) {
+namespace {
+
+/// Computes a SipHash value
+///
+/// \param in: pointer to input data (read-only)
+/// \param inlen: input data length in bytes (any size_t value)
+/// \param k: reference to the key data 16-byte array (read-only)
+/// \returns output data, must be 8 or 16 bytes
+///
+template <int cROUNDS, int dROUNDS, size_t outlen>
+void siphash(const unsigned char *in, uint64_t inlen,
+             const unsigned char (&k)[16], unsigned char (&out)[outlen]) {
 
   const unsigned char *ni = (const unsigned char *)in;
   const unsigned char *kk = (const unsigned char *)k;
 
-  static_assert(sizeof(ResultTy) == 8 || sizeof(ResultTy) == 16,
-                "result type should be uint64_t or uint128_t");
+  static_assert(outlen == 8 || outlen == 16, "result should be 8 or 16 bytes");
+
   uint64_t v0 = UINT64_C(0x736f6d6570736575);
   uint64_t v1 = UINT64_C(0x646f72616e646f6d);
   uint64_t v2 = UINT64_C(0x6c7967656e657261);
   uint64_t v3 = UINT64_C(0x7465646279746573);
-  uint64_t k0 = U8TO64_LE(kk);
-  uint64_t k1 = U8TO64_LE(kk + 8);
+  uint64_t k0 = endian::read64le(kk);
+  uint64_t k1 = endian::read64le(kk + 8);
   uint64_t m;
   int i;
   const unsigned char *end = ni + inlen - (inlen % sizeof(uint64_t));
@@ -76,11 +82,11 @@ static inline ResultTy siphash(const unsigned char *in, uint64_t inlen,
   v1 ^= k1;
   v0 ^= k0;
 
-  if (sizeof(ResultTy) == 16)
+  if (outlen == 16)
     v1 ^= 0xee;
 
   for (; ni != end; ni += 8) {
-    m = U8TO64_LE(ni);
+    m = endian::read64le(ni);
     v3 ^= m;
 
     for (i = 0; i < cROUNDS; ++i)
@@ -122,7 +128,7 @@ static inline ResultTy siphash(const unsigned char *in, uint64_t inlen,
 
   v0 ^= b;
 
-  if (sizeof(ResultTy) == 16)
+  if (outlen == 16)
     v2 ^= 0xee;
   else
     v2 ^= 0xff;
@@ -131,10 +137,10 @@ static inline ResultTy siphash(const unsigned char *in, uint64_t inlen,
     SIPROUND;
 
   b = v0 ^ v1 ^ v2 ^ v3;
+  endian::write64le(out, b);
 
-  uint64_t firstHalf = b;
-  if (sizeof(ResultTy) == 8)
-    return firstHalf;
+  if (outlen == 8)
+    return;
 
   v1 ^= 0xdd;
 
@@ -142,10 +148,10 @@ static inline ResultTy siphash(const unsigned char *in, uint64_t inlen,
     SIPROUND;
 
   b = v0 ^ v1 ^ v2 ^ v3;
-  uint64_t secondHalf = b;
-
-  return firstHalf | (ResultTy(secondHalf) << (sizeof(ResultTy) == 8 ? 0 : 64));
+  endian::write64le(out + 8, b);
 }
+
+} // end anonymous namespace
 
 //===--- LLVM-specific wrapper around siphash.
 
@@ -156,7 +162,9 @@ uint16_t llvm::getPointerAuthStableSipHash(StringRef Str) {
 
   // The aliasing is fine here because of omnipotent char.
   const auto *Data = reinterpret_cast<const uint8_t *>(Str.data());
-  uint64_t RawHash = siphash<2, 4, uint64_t>(Data, Str.size(), K);
+  uint8_t RawHashBytes[8];
+  siphash<2, 4>(Data, Str.size(), K, RawHashBytes);
+  uint64_t RawHash = endian::read64le(RawHashBytes);
 
   // Produce a non-zero 16-bit discriminator.
   uint16_t Discriminator = (RawHash % 0xFFFF) + 1;
