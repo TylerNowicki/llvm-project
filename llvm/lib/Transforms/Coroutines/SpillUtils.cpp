@@ -23,17 +23,6 @@ namespace {
 
 typedef SmallPtrSet<BasicBlock *, 8> VisitedBlocksSet;
 
-static bool isSuspendBlock(BasicBlock *BB) {
-  return isa<AnyCoroSuspendInst>(BB->front());
-}
-
-// Check for structural coroutine intrinsics that should not be spilled into
-// the coroutine frame.
-static bool isCoroutineStructureIntrinsic(Instruction &I) {
-  return isa<CoroIdInst>(&I) || isa<CoroSaveInst>(&I) ||
-         isa<CoroSuspendInst>(&I);
-}
-
 /// Does control flow starting at the given block ever reach a suspend
 /// instruction before reaching a block in VisitedOrFreeBBs?
 static bool isSuspendReachableFrom(BasicBlock *From,
@@ -45,7 +34,7 @@ static bool isSuspendReachableFrom(BasicBlock *From,
     return false;
 
   // We assume that we'll already have split suspends into their own blocks.
-  if (isSuspendBlock(From))
+  if (coro::isSuspendBlock(From))
     return true;
 
   // Recurse on the successors.
@@ -448,6 +437,13 @@ static void collectFrameAlloca(AllocaInst *AI, const coro::Shape &Shape,
 
 } // namespace
 
+// Check for structural coroutine intrinsics that should not be spilled into
+// the coroutine frame.
+bool isCoroutineStructureIntrinsic(Instruction &I) {
+  return isa<CoroIdInst>(&I) || isa<CoroSaveInst>(&I) ||
+         isa<CoroSuspendInst>(&I);
+}
+
 void collectSpillsFromArgs(SpillInfo &Spills, Function &F,
                            const SuspendCrossingInfo &Checker) {
   // Collect the spills for arguments and other not-materializable values.
@@ -626,6 +622,6 @@ BasicBlock::iterator getSpillInsertionPt(const coro::Shape &Shape, Value *Def,
   return InsertPt;
 }
 
-} // End namespace coro.
+} // namespace coro
 
-} // End namespace llvm.
+} // namespace llvm
