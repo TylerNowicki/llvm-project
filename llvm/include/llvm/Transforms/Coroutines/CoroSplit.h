@@ -28,17 +28,28 @@ struct Shape;
 } // namespace coro
 
 struct CoroSplitPass : PassInfoMixin<CoroSplitPass> {
+  using BaseABITy =
+      std::function<std::unique_ptr<coro::BaseABI>(Function &, coro::Shape &)>;
 
   CoroSplitPass(bool OptimizeFrame = false);
+
+  CoroSplitPass(SmallVector<BaseABITy> GenCustomABIs,
+                bool OptimizeFrame = false);
+
+  // For back compatibility, constructor takes a materiaizlable callback.
   CoroSplitPass(std::function<bool(Instruction &)> MaterializableCallback,
+                bool OptimizeFrame = false);
+
+  // For back compatibility, constructor takes a materiaizlable callback.
+  CoroSplitPass(std::function<bool(Instruction &)> MaterializableCallback,
+                SmallVector<BaseABITy> GenCustomABIs,
                 bool OptimizeFrame = false);
 
   PreservedAnalyses run(LazyCallGraph::SCC &C, CGSCCAnalysisManager &AM,
                         LazyCallGraph &CG, CGSCCUpdateResult &UR);
+
   static bool isRequired() { return true; }
 
-  using BaseABITy =
-      std::function<std::unique_ptr<coro::BaseABI>(Function &, coro::Shape &)>;
   // Generator for an ABI transformer
   BaseABITy CreateAndInitABI;
 
