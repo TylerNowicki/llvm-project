@@ -2197,7 +2197,16 @@ static void addPrepareFunction(const Module &M,
     Fns.push_back(PrepareFn);
 }
 
-static coro::BaseABI *CreateNewABI(Function &F, coro::Shape &S) {
+static coro::BaseABI *
+CreateNewABI(Function &F, coro::Shape &S,
+             const SmallVector<CoroSplitPass::BaseABITy> GenCustomABIs) {
+  if (S.CoroBegin->hasCustomABI()) {
+    unsigned CustomABI = S.CoroBegin->getCustomABI();
+    if (CustomABI >= GenCustomABIs.size())
+      llvm_unreachable("Custom ABI not found amoung those specified");
+    return GenCustomABIs[CustomABI](F, S);
+  }
+
   switch (S.ABI) {
   case coro::ABI::Switch:
     return new coro::SwitchABI(F, S);
@@ -2213,7 +2222,16 @@ static coro::BaseABI *CreateNewABI(Function &F, coro::Shape &S) {
 
 CoroSplitPass::CoroSplitPass(bool OptimizeFrame)
     : CreateAndInitABI([](Function &F, coro::Shape &S) {
-        coro::BaseABI *ABI = CreateNewABI(F, S);
+        coro::BaseABI *ABI = CreateNewABI(F, S, {});
+        ABI->init();
+        return ABI;
+      }),
+      OptimizeFrame(OptimizeFrame) {}
+
+CoroSplitPass::CoroSplitPass(
+    SmallVector<CoroSplitPass::BaseABITy> GenCustomABIs, bool OptimizeFrame)
+    : CreateAndInitABI([=](Function &F, coro::Shape &S) {
+        coro::BaseABI *ABI = CreateNewABI(F, S, GenCustomABIs);
         ABI->init();
         return ABI;
       }),
@@ -2221,7 +2239,15 @@ CoroSplitPass::CoroSplitPass(bool OptimizeFrame)
 
 static coro::BaseABI *
 CreateNewABIIsMat(Function &F, coro::Shape &S,
-                  std::function<bool(Instruction &)> IsMatCallback) {
+                  std::function<bool(Instruction &)> IsMatCallback,
+                  const SmallVector<CoroSplitPass::BaseABITy> GenCustomABIs) {
+  if (S.CoroBegin->hasCustomABI()) {
+    unsigned CustomABI = S.CoroBegin->getCustomABI();
+    if (CustomABI >= GenCustomABIs.size())
+      llvm_unreachable("Custom ABI not found amoung those specified");
+    return GenCustomABIs[CustomABI](F, S);
+  }
+
   switch (S.ABI) {
   case coro::ABI::Switch:
     return new coro::SwitchABI(F, S, IsMatCallback);
@@ -2240,7 +2266,20 @@ CreateNewABIIsMat(Function &F, coro::Shape &S,
 CoroSplitPass::CoroSplitPass(std::function<bool(Instruction &)> IsMatCallback,
                              bool OptimizeFrame)
     : CreateAndInitABI([=](Function &F, coro::Shape &S) {
-        coro::BaseABI *ABI = CreateNewABIIsMat(F, S, IsMatCallback);
+        coro::BaseABI *ABI = CreateNewABIIsMat(F, S, IsMatCallback, {});
+        ABI->init();
+        return ABI;
+      }),
+      OptimizeFrame(OptimizeFrame) {}
+
+// For back compatibility, constructor takes a materializable callback and
+// creates a generator for an ABI with a modified materializable callback.
+CoroSplitPass::CoroSplitPass(
+    std::function<bool(Instruction &)> IsMatCallback,
+    SmallVector<CoroSplitPass::BaseABITy> GenCustomABIs, bool OptimizeFrame)
+    : CreateAndInitABI([=](Function &F, coro::Shape &S) {
+        coro::BaseABI *ABI =
+            CreateNewABIIsMat(F, S, IsMatCallback, GenCustomABIs);
         ABI->init();
         return ABI;
       }),

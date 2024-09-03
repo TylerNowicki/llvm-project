@@ -32,7 +32,17 @@ struct CoroSplitPass : PassInfoMixin<CoroSplitPass> {
   using BaseABITy = std::function<coro::BaseABI *(Function &, coro::Shape &)>;
 
   CoroSplitPass(bool OptimizeFrame = false);
+
+  CoroSplitPass(SmallVector<BaseABITy> GenCustomABIs,
+                bool OptimizeFrame = false);
+
+  // For back compatibility, constructor takes a materiaizlable callback.
   CoroSplitPass(std::function<bool(Instruction &)> MaterializableCallback,
+                bool OptimizeFrame = false);
+
+  // For back compatibility, constructor takes a materiaizlable callback.
+  CoroSplitPass(std::function<bool(Instruction &)> MaterializableCallback,
+                SmallVector<BaseABITy> GenCustomABIs,
                 bool OptimizeFrame = false);
 
   PreservedAnalyses run(LazyCallGraph::SCC &C, CGSCCAnalysisManager &AM,
