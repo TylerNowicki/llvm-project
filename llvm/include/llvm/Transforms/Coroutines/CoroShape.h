@@ -12,9 +12,9 @@
 #ifndef LLVM_TRANSFORMS_COROUTINES_COROSHAPE_H
 #define LLVM_TRANSFORMS_COROUTINES_COROSHAPE_H
 
-#include "CoroInstr.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/Transforms/Coroutines/CoroInstr.h"
 
 namespace llvm {
 
@@ -22,6 +22,10 @@ class CallGraph;
 
 namespace coro {
 
+// This enum is used by CoroSplitPass's internal methods for implementing ABI
+// specific behavior. Ideally, this would not be necessary and all behavior
+// would be implemented by the ABI objects. However, it is not practical and
+// not necessary to move such code to the ABI objects.
 enum class ABI {
   /// The "resume-switch" lowering, where there are separate resume and
   /// destroy functions that are shared between all suspend points.  The
@@ -49,7 +53,7 @@ enum class ABI {
 
 // Holds structural Coroutine Intrinsics for a particular function and other
 // values used during CoroSplit pass.
-struct LLVM_LIBRARY_VISIBILITY Shape {
+struct Shape {
   CoroBeginInst *CoroBegin = nullptr;
   SmallVector<AnyCoroEndInst *, 4> CoroEnds;
   SmallVector<CoroSizeInst *, 2> CoroSizes;

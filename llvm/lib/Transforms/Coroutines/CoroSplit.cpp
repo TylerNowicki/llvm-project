@@ -19,8 +19,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Coroutines/CoroSplit.h"
-#include "ABI.h"
-#include "CoroInstr.h"
 #include "CoroInternal.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/PriorityWorklist.h"
@@ -63,6 +61,8 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Transforms/Coroutines/ABI.h"
+#include "llvm/Transforms/Coroutines/CoroInstr.h"
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/CallGraphUpdater.h"
