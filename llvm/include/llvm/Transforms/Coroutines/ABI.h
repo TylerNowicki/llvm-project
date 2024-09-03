@@ -10,13 +10,13 @@
 // coroutine lowering.
 //===----------------------------------------------------------------------===//
 
-#ifndef LIB_TRANSFORMS_COROUTINES_ABI_H
-#define LIB_TRANSFORMS_COROUTINES_ABI_H
+#ifndef LLVM_TRANSFORMS_COROUTINES_ABI_H
+#define LLVM_TRANSFORMS_COROUTINES_ABI_H
 
-#include "CoroShape.h"
-#include "MaterializationUtils.h"
-#include "SuspendCrossingInfo.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
+#include "llvm/Transforms/Coroutines/CoroShape.h"
+#include "llvm/Transforms/Coroutines/MaterializationUtils.h"
+#include "llvm/Transforms/Coroutines/SuspendCrossingInfo.h"
 
 namespace llvm {
 
@@ -29,7 +29,7 @@ namespace coro {
 // ABI operations. The ABIs (e.g. Switch, Async, Retcon{Once}) are the common
 // ABIs.
 
-class LLVM_LIBRARY_VISIBILITY BaseABI {
+class BaseABI {
 public:
   BaseABI(Function &F, Shape &S)
       : F(F), Shape(S), IsMaterializable(coro::isTriviallyMaterializable) {}
@@ -57,7 +57,7 @@ public:
   std::function<bool(Instruction &I)> IsMaterializable;
 };
 
-class LLVM_LIBRARY_VISIBILITY SwitchABI : public BaseABI {
+class SwitchABI : public BaseABI {
 public:
   SwitchABI(Function &F, coro::Shape &S) : BaseABI(F, S) {}
 
@@ -72,7 +72,7 @@ public:
                       TargetTransformInfo &TTI) override;
 };
 
-class LLVM_LIBRARY_VISIBILITY AsyncABI : public BaseABI {
+class AsyncABI : public BaseABI {
 public:
   AsyncABI(Function &F, coro::Shape &S) : BaseABI(F, S) {}
 
@@ -87,7 +87,7 @@ public:
                       TargetTransformInfo &TTI) override;
 };
 
-class LLVM_LIBRARY_VISIBILITY AnyRetconABI : public BaseABI {
+class AnyRetconABI : public BaseABI {
 public:
   AnyRetconABI(Function &F, coro::Shape &S) : BaseABI(F, S) {}
 
