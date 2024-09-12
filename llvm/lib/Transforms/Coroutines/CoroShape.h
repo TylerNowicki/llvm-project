@@ -118,9 +118,6 @@ struct LLVM_LIBRARY_VISIBILITY Shape {
   Value *FramePtr = nullptr;
   BasicBlock *AllocaSpillBlock = nullptr;
 
-  /// This would only be true if optimization are enabled.
-  bool OptimizeFrame;
-
   struct SwitchLoweringStorage {
     SwitchInst *ResumeSwitch;
     AllocaInst *PromiseAlloca;
@@ -271,10 +268,7 @@ struct LLVM_LIBRARY_VISIBILITY Shape {
   void emitDealloc(IRBuilder<> &Builder, Value *Ptr, CallGraph *CG) const;
 
   Shape() = default;
-  explicit Shape(Function &F, bool OptimizeFrame = false)
-      : OptimizeFrame(OptimizeFrame) {
-    analyze(F);
-  }
+  explicit Shape(Function &F) { analyze(F); }
 };
 
 } // end namespace coro
