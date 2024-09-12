@@ -2052,7 +2052,8 @@ void coro::SwitchABI::splitCoroutine(Function &F, coro::Shape &Shape,
 }
 
 static void doSplitCoroutine(Function &F, SmallVectorImpl<Function *> &Clones,
-                             coro::BaseABI &ABI, TargetTransformInfo &TTI) {
+                             coro::BaseABI &ABI, TargetTransformInfo &TTI,
+                             bool OptimizeFrame) {
   PrettyStackTraceFunction prettyStackTrace(F);
 
   auto &Shape = ABI.Shape;
@@ -2063,7 +2064,7 @@ static void doSplitCoroutine(Function &F, SmallVectorImpl<Function *> &Clones,
   simplifySuspendPoints(Shape);
 
   normalizeCoroutine(F, Shape, TTI);
-  ABI.buildCoroutineFrame();
+  ABI.buildCoroutineFrame(OptimizeFrame);
   replaceFrameSizeAndAlignment(Shape);
 
   bool isNoSuspendCoroutine = Shape.CoroSuspends.empty();
@@ -2281,7 +2282,7 @@ PreservedAnalyses CoroSplitPass::run(LazyCallGraph::SCC &C,
     // unreachable blocks before collecting intrinsics into Shape.
     removeUnreachableBlocks(F);
 
-    coro::Shape Shape(F, OptimizeFrame);
+    coro::Shape Shape(F);
     if (!Shape.CoroBegin)
       continue;
 
@@ -2291,7 +2292,7 @@ PreservedAnalyses CoroSplitPass::run(LazyCallGraph::SCC &C,
 
     SmallVector<Function *, 4> Clones;
     auto &TTI = FAM.getResult<TargetIRAnalysis>(F);
-    doSplitCoroutine(F, Clones, *ABI, TTI);
+    doSplitCoroutine(F, Clones, *ABI, TTI, OptimizeFrame);
     CurrentSCC = &updateCallGraphAfterCoroutineSplit(
         *N, Shape, Clones, *CurrentSCC, CG, AM, UR, FAM);
 
