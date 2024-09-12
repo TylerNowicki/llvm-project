@@ -110,6 +110,8 @@ struct LLVM_LIBRARY_VISIBILITY Shape {
 
   coro::ABI ABI;
 
+  // Values below are used by ABIs for lowering. Ideally, these would live in
+  // the ABI objects along with the helpers that use them.
   StructType *FrameTy = nullptr;
   Align FrameAlign;
   uint64_t FrameSize = 0;
@@ -272,12 +274,6 @@ struct LLVM_LIBRARY_VISIBILITY Shape {
   explicit Shape(Function &F, bool OptimizeFrame = false)
       : OptimizeFrame(OptimizeFrame) {
     analyze(F);
-    if (!CoroBegin) {
-      invalidateCoroutine(F);
-      return;
-    }
-    initABI();
-    tidyCoroutine();
   }
 };
 
