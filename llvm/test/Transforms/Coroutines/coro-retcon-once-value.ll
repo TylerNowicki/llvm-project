@@ -121,7 +121,7 @@ declare void @print(i32)
 ;
 ;
 ; CHECK-LABEL: @f.resume.0(
-; CHECK-NEXT:  entryresume.0:
+; CHECK-NEXT:  AfterCoroSuspend:
 ; CHECK-NEXT:    br i1 [[TMP1:%.*]], label [[COROEND:%.*]], label [[CLEANUP_SINK_SPLIT:%.*]]
 ; CHECK:       cleanup.sink.split:
 ; CHECK-NEXT:    [[ARRAY_RELOAD:%.*]] = load ptr, ptr [[TMP0:%.*]], align 8
@@ -132,7 +132,7 @@ declare void @print(i32)
 ;
 ;
 ; CHECK-LABEL: @f.resume.1(
-; CHECK-NEXT:  entryresume.1:
+; CHECK-NEXT:  AfterCoroSuspend2:
 ; CHECK-NEXT:    br i1 [[TMP1:%.*]], label [[COROEND:%.*]], label [[CLEANUP_SINK_SPLIT:%.*]]
 ; CHECK:       cleanup.sink.split:
 ; CHECK-NEXT:    [[ARRAY_RELOAD:%.*]] = load ptr, ptr [[TMP0:%.*]], align 8
@@ -172,7 +172,7 @@ declare void @print(i32)
 ;
 ;
 ; CHECK-LABEL: @g.resume.0(
-; CHECK-NEXT:  entryresume.0:
+; CHECK-NEXT:  AfterCoroSuspend:
 ; CHECK-NEXT:    [[TMP2:%.*]] = load ptr, ptr [[TMP0:%.*]], align 8
 ; CHECK-NEXT:    br i1 [[TMP1:%.*]], label [[COROEND:%.*]], label [[CLEANUP_SINK_SPLIT:%.*]]
 ; CHECK:       cleanup.sink.split:
@@ -190,7 +190,7 @@ declare void @print(i32)
 ;
 ;
 ; CHECK-LABEL: @g.resume.1(
-; CHECK-NEXT:  entryresume.1:
+; CHECK-NEXT:  AfterCoroSuspend2:
 ; CHECK-NEXT:    [[TMP2:%.*]] = load ptr, ptr [[TMP0:%.*]], align 8
 ; CHECK-NEXT:    br i1 [[TMP1:%.*]], label [[COROEND:%.*]], label [[CLEANUP_SINK_SPLIT:%.*]]
 ; CHECK:       cleanup.sink.split:

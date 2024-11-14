@@ -481,6 +481,64 @@ static Function *createCloneDeclaration(Function &OrigF, coro::Shape &Shape,
   return NewF;
 }
 
+/// Setup the mapping from the active llvm.coro.suspend.retcon in the old
+/// function to the arguments of the cloned continuation function.
+///
+/// This will create a new BB in the continuation function if the args include
+/// aggragate uses. This new BB is temporary and its instructions must be moved
+/// into an appropriate block after cloning.
+BasicBlock *CoroCloner::mapRetconOrAsyncSuspendUses() {
+  assert(Shape.ABI == coro::ABI::Retcon || Shape.ABI == coro::ABI::RetconOnce);
+
+  if (ActiveSuspend->use_empty())
+    return nullptr;
+
+  // Copy out all the continuation arguments after the buffer pointer into
+  // an easily-indexed data structure for convenience.
+  SmallVector<Value *, 8> Args;
+  // The async ABI includes all arguments -- including the first argument.
+  bool IsAsyncABI = Shape.ABI == coro::ABI::Async;
+  for (auto I = IsAsyncABI ? NewF->arg_begin() : std::next(NewF->arg_begin()),
+            E = NewF->arg_end();
+       I != E; ++I)
+    Args.push_back(&*I);
+
+  // If the suspend returns a single scalar value, we can just do a simple
+  // mapping.
+  if (!isa<StructType>(ActiveSuspend->getType())) {
+    assert(Args.size() == 1);
+    VMap[ActiveSuspend] = Args.front();
+    return nullptr;
+  }
+
+  // Try to re-use the existing extract values of an aggregate return.
+  for (Use &U : llvm::make_early_inc_range(ActiveSuspend->uses())) {
+    auto *EVI = dyn_cast<ExtractValueInst>(U.getUser());
+    if (!EVI || EVI->getNumIndices() != 1)
+      continue;
+
+    VMap[EVI] = Args[EVI->getIndices().front()];
+  }
+
+  // It is necessary to provide a mapping for the suspend because uses of the
+  // suspend will exist when cloning even if all the uses have an existing
+  // extract value that is mapped to arguments above.
+
+  // We need to create an aggregate of the arguments, here we need to create a
+  // new BB for the agg. If all uses of the suspend are by existing extract
+  // value insts then this aggragate will be deadcode.
+  assert(NewF->empty());
+  auto *AggBlock = BasicBlock::Create(NewF->getContext(), "entry", NewF);
+  IRBuilder<> Builder(AggBlock);
+  Value *Aggr = PoisonValue::get(ActiveSuspend->getType());
+  for (auto [Index, Arg] : llvm::enumerate(Args))
+    Aggr = Builder.CreateInsertValue(Aggr, Arg, Index);
+
+  VMap[ActiveSuspend] = Aggr;
+
+  return AggBlock;
+}
+
 /// Replace uses of the active llvm.coro.suspend.retcon/async call with the
 /// arguments to the continuation function.
 ///
@@ -574,8 +632,10 @@ void coro::BaseCloner::replaceCoroEnds() {
   for (AnyCoroEndInst *CE : Shape.CoroEnds) {
     // We use a null call graph because there's no call graph node for
     // the cloned function yet.  We'll just be rebuilding that later.
-    auto *NewCE = cast<AnyCoroEndInst>(VMap[CE]);
-    replaceCoroEnd(NewCE, Shape, NewFramePtr, /*in resume*/ true, nullptr);
+    if (VMap.count(CE)) {
+      auto *NewCE = cast<AnyCoroEndInst>(VMap[CE]);
+      replaceCoroEnd(NewCE, Shape, NewFramePtr, /*in resume*/ true, nullptr);
+    }
   }
 }
 
@@ -724,9 +784,7 @@ void coro::BaseCloner::replaceEntryBlock() {
     Builder.CreateBr(SwitchBB);
     break;
   }
-  case coro::ABI::Async:
-  case coro::ABI::Retcon:
-  case coro::ABI::RetconOnce: {
+  case coro::ABI::Async: {
     // In continuation ABIs, we want to branch to immediately after the
     // active suspend point.  Earlier phases will have put the suspend in its
     // own basic block, so just thread our jump directly to its successor.
@@ -739,6 +797,23 @@ void coro::BaseCloner::replaceEntryBlock() {
     auto Branch = cast<BranchInst>(MappedCS->getNextNode());
     assert(Branch->isUnconditional());
     Builder.CreateBr(Branch->getSuccessor(0));
+    break;
+  }
+  case coro::ABI::Retcon:
+  case coro::ABI::RetconOnce: {
+    // In continuation ABIs, we want to branch to immediately after the
+    // active suspend point.  Earlier phases will have put the suspend in its
+    // own basic block, so just thread our jump directly to its successor.
+    assert((Shape.ABI == coro::ABI::Async &&
+            isa<CoroSuspendAsyncInst>(ActiveSuspend)) ||
+           ((Shape.ABI == coro::ABI::Retcon ||
+             Shape.ABI == coro::ABI::RetconOnce) &&
+            isa<CoroSuspendRetconInst>(ActiveSuspend)));
+    auto Branch = cast<BranchInst>(ActiveSuspend->getNextNode());
+    assert(Branch->isUnconditional());
+    auto ResumeBlock = Branch->getSuccessor(0);
+    auto MappedResumeBlock = cast<BasicBlock>(VMap[ResumeBlock]);
+    Builder.CreateBr(MappedResumeBlock);
     break;
   }
   }
@@ -908,8 +983,6 @@ void coro::BaseCloner::create() {
     VMap[&A] = DummyArgs.back();
   }
 
-  SmallVector<ReturnInst *, 4> Returns;
-
   // Ignore attempts to change certain attributes of the function.
   // TODO: maybe there should be a way to suppress this during cloning?
   auto savedVisibility = NewF->getVisibility();
@@ -925,8 +998,45 @@ void coro::BaseCloner::create() {
   CloneFunctionAttributesInto(NewF, &OrigF, VMap, false);
   CloneFunctionMetadataInto(*NewF, OrigF, VMap, RF_None, nullptr, nullptr,
                             &CommonDebugInfo);
-  CloneFunctionBodyInto(*NewF, OrigF, VMap, RF_None, Returns, "", nullptr,
-                        nullptr, nullptr, &CommonDebugInfo);
+
+  SmallVector<ReturnInst *, 4> Returns;
+
+  switch (Shape.ABI) {
+  case coro::ABI::Switch:
+  case coro::ABI::Async: {
+    CloneFunctionInto(NewF, &OrigF, VMap,
+                      CloneFunctionChangeType::LocalChangesOnly, Returns);
+    break;
+  }
+  case coro::ABI::Retcon:
+  case coro::ABI::RetconOnce: {
+    assert(ActiveSuspend != nullptr &&
+           "no active suspend when lowering a continuation-style coroutine");
+
+    // Map uses of the active suspend to the corresponding continuation-
+    // function arguments.
+    auto AggBlock = mapRetconOrAsyncSuspendUses();
+
+    auto Branch = cast<BranchInst>(ActiveSuspend->getNextNode());
+    assert(Branch->isUnconditional());
+    auto ResumeBlock = Branch->getSuccessor(0);
+
+    // Each pre-suspend BB has already been redirected to the terminator, so
+    // the cloning will only clone the BBs necessary for this suspend.
+    CloneAndPruneIntoContinuation(
+        NewF, &OrigF, Shape.AllocaSpillBlock, ResumeBlock, VMap,
+        /*ModuleLevelChanges*/ false, Returns, Suffix.str().c_str());
+
+    // Move the instrs from the aggragate block into the AllocaSpillBlock and
+    // remove the now unused AggBlock.
+    if (AggBlock) {
+      auto ASBlock = cast<BasicBlock>(VMap[Shape.AllocaSpillBlock]);
+      ASBlock->splice(ASBlock->getFirstInsertionPt(), AggBlock);
+      AggBlock->eraseFromParent();
+    }
+    break;
+  }
+  }
 
   auto &Context = NewF->getContext();
 
@@ -1050,7 +1160,8 @@ void coro::BaseCloner::create() {
   NewF->setCallingConv(Shape.getResumeFunctionCC());
 
   // Set up the new entry block.
-  replaceEntryBlock();
+  if (Shape.ABI != coro::ABI::Retcon && Shape.ABI != coro::ABI::RetconOnce)
+    replaceEntryBlock();
 
   // Turn symmetric transfers into musttail calls.
   for (CallInst *ResumeCall : Shape.SymmetricTransfers) {
@@ -1101,13 +1212,12 @@ void coro::BaseCloner::create() {
       handleFinalSuspend();
     break;
   case coro::ABI::Async:
-  case coro::ABI::Retcon:
-  case coro::ABI::RetconOnce:
     // Replace uses of the active suspend with the corresponding
     // continuation-function arguments.
-    assert(ActiveSuspend != nullptr &&
-           "no active suspend when lowering a continuation-style coroutine");
     replaceRetconOrAsyncSuspendUses();
+    break;
+  case coro::ABI::Retcon:
+  case coro::ABI::RetconOnce:
     break;
   }
 
@@ -2031,6 +2141,17 @@ static void doSplitCoroutine(Function &F, SmallVectorImpl<Function *> &Clones,
   } else {
     ABI.splitCoroutine(F, Shape, Clones, TTI);
   }
+
+  LLVM_DEBUG({
+    dbgs() << "---Function After splitCoroutines---\n";
+    dbgs() << "Main Function:\n";
+    F.dump();
+    dbgs() << "Cloned (Resume) Functions:\n";
+    for (auto C : Clones) {
+      C->dump();
+      dbgs() << "\n";
+    }
+  });
 
   // Replace all the swifterror operations in the original function.
   // This invalidates SwiftErrorOps in the Shape.

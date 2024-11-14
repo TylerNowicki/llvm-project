@@ -206,6 +206,15 @@ void CloneFunctionBodyInto(Function &NewFunc, const Function &OldFunc,
                            ValueMaterializer *Materializer = nullptr,
                            const MetadataSetTy *IdentityMD = nullptr);
 
+/// This first clones recursively from the entry block to the AllocaSpillBlock,
+/// then clone recursively starting from the ResumeBlock.
+void CloneAndPruneIntoContinuation(
+    Function *ResumeFunc, const Function *OldFunc,
+    const BasicBlock *AllocaSpillBlock, const BasicBlock *ResumeBlock,
+    ValueToValueMapTy &VMap, bool ModuleLevelChanges,
+    SmallVectorImpl<ReturnInst *> &Returns, const char *NameSuffix = "",
+    ClonedCodeInfo *CodeInfo = nullptr);
+
 void CloneAndPruneIntoFromInst(Function *NewFunc, const Function *OldFunc,
                                const Instruction *StartingInst,
                                ValueToValueMapTy &VMap, bool ModuleLevelChanges,

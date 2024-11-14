@@ -23,6 +23,7 @@
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -697,38 +698,12 @@ void PruningFunctionCloner::CloneBlock(
   }
 }
 
-/// This works like CloneAndPruneFunctionInto, except that it does not clone the
-/// entire function. Instead it starts at an instruction provided by the caller
-/// and copies (and prunes) only the code reachable from that instruction.
-void llvm::CloneAndPruneIntoFromInst(Function *NewFunc, const Function *OldFunc,
-                                     const Instruction *StartingInst,
-                                     ValueToValueMapTy &VMap,
-                                     bool ModuleLevelChanges,
-                                     SmallVectorImpl<ReturnInst *> &Returns,
-                                     const char *NameSuffix,
-                                     ClonedCodeInfo *CodeInfo) {
-  assert(NameSuffix && "NameSuffix cannot be null!");
-
+static BasicBlock *RemapClonedFunction(Function *NewFunc,
+                                       const Function *OldFunc,
+                                       ValueToValueMapTy &VMap,
+                                       bool ModuleLevelChanges) {
   ValueMapTypeRemapper *TypeMapper = nullptr;
   ValueMaterializer *Materializer = nullptr;
-
-#ifndef NDEBUG
-  // If the cloning starts at the beginning of the function, verify that
-  // the function arguments are mapped.
-  if (!StartingInst)
-    for (const Argument &II : OldFunc->args())
-      assert(VMap.count(&II) && "No mapping from source argument specified!");
-#endif
-
-  PruningFunctionCloner PFC(NewFunc, OldFunc, VMap, ModuleLevelChanges,
-                            NameSuffix, CodeInfo);
-  const BasicBlock *StartingBB;
-  if (StartingInst)
-    StartingBB = StartingInst->getParent();
-  else {
-    StartingBB = &OldFunc->getEntryBlock();
-    StartingInst = &StartingBB->front();
-  }
 
   // Collect debug intrinsics for remapping later.
   SmallVector<const DbgVariableIntrinsic *, 8> DbgIntrinsics;
@@ -739,20 +714,12 @@ void llvm::CloneAndPruneIntoFromInst(Function *NewFunc, const Function *OldFunc,
     }
   }
 
-  // Clone the entry block, and anything recursively reachable from it.
-  std::vector<const BasicBlock *> CloneWorklist;
-  PFC.CloneBlock(StartingBB, StartingInst->getIterator(), CloneWorklist);
-  while (!CloneWorklist.empty()) {
-    const BasicBlock *BB = CloneWorklist.back();
-    CloneWorklist.pop_back();
-    PFC.CloneBlock(BB, BB->begin(), CloneWorklist);
-  }
-
   // Loop over all of the basic blocks in the old function.  If the block was
   // reachable, we have cloned it and the old block is now in the value map:
   // insert it into the new function in the right order.  If not, ignore it.
   //
   // Defer PHI resolution until rest of function is resolved.
+  BasicBlock *StartingBB = nullptr;
   SmallVector<const PHINode *, 16> PHIToResolve;
   for (const BasicBlock &BI : *OldFunc) {
     Value *V = VMap.lookup(&BI);
@@ -762,6 +729,10 @@ void llvm::CloneAndPruneIntoFromInst(Function *NewFunc, const Function *OldFunc,
 
     // Move the new block to preserve the order in the original function.
     NewBB->moveBefore(NewFunc->end());
+
+    // The earliest block is the beginning of the cloned range of blocks.
+    if (!StartingBB)
+      StartingBB = NewBB;
 
     // Handle PHI nodes specially, as we have to remove references to dead
     // blocks.
@@ -911,7 +882,7 @@ void llvm::CloneAndPruneIntoFromInst(Function *NewFunc, const Function *OldFunc,
 
   // Do the same for DbgVariableRecords, touching all the instructions in the
   // cloned range of blocks.
-  Function::iterator Begin = cast<BasicBlock>(VMap[StartingBB])->getIterator();
+  Function::iterator Begin = StartingBB->getIterator();
   for (BasicBlock &BB : make_range(Begin, NewFunc->end())) {
     for (Instruction &I : BB) {
       RemapDbgRecordRange(I.getModule(), I.getDbgRecordRange(), VMap,
@@ -920,6 +891,14 @@ void llvm::CloneAndPruneIntoFromInst(Function *NewFunc, const Function *OldFunc,
                           TypeMapper, Materializer);
     }
   }
+
+  return StartingBB;
+}
+
+static void SimplifyClonedFunction(Function *NewFunc, BasicBlock *NewStartingBB,
+                                   ValueToValueMapTy &VMap,
+                                   SmallVectorImpl<ReturnInst *> &Returns) {
+  auto Begin = NewStartingBB->getIterator();
 
   // Simplify conditional branches and switches with a constant operand. We try
   // to prune these out when cloning, but if the simplification required
@@ -984,15 +963,201 @@ void llvm::CloneAndPruneIntoFromInst(Function *NewFunc, const Function *OldFunc,
 
     // Do not increment I, iteratively merge all things this block branches to.
   }
+}
+
+static void GatherReturns(Function *NewFunc, BasicBlock *NewStartingBB,
+                          SmallVectorImpl<ReturnInst *> &Returns) {
+  auto Begin = NewStartingBB->getIterator();
 
   // Make a final pass over the basic blocks from the old function to gather
   // any return instructions which survived folding. We have to do this here
   // because we can iteratively remove and merge returns above.
-  for (Function::iterator I = cast<BasicBlock>(VMap[StartingBB])->getIterator(),
-                          E = NewFunc->end();
-       I != E; ++I)
+  for (Function::iterator I = Begin, E = NewFunc->end(); I != E; ++I)
     if (ReturnInst *RI = dyn_cast<ReturnInst>(I->getTerminator()))
       Returns.push_back(RI);
+}
+
+void llvm::CloneAndPruneIntoContinuation(
+    Function *ResumeFunc, const Function *OldFunc,
+    const BasicBlock *AllocaSpillBlock, const BasicBlock *ResumeBlock,
+    ValueToValueMapTy &VMap, bool ModuleLevelChanges,
+    SmallVectorImpl<ReturnInst *> &Returns, const char *NameSuffix,
+    ClonedCodeInfo *CodeInfo) {
+
+  auto AllocaSpillPred = AllocaSpillBlock->getSinglePredecessor();
+  ResumeFunc->setIsNewDbgInfoFormat(OldFunc->IsNewDbgInfoFormat);
+  assert(NameSuffix && "NameSuffix cannot be null!");
+
+#ifndef NDEBUG
+  for (const Argument &I : OldFunc->args())
+    assert(VMap.count(&I) && "No mapping from source argument specified!");
+#endif
+
+  CloneFunctionAttributesInto(ResumeFunc, OldFunc, VMap, ModuleLevelChanges);
+
+  // The goal here is to only clone the blocks needed for this resume to avoid
+  // unnecessary cloning and subsequent cleanup. // Note, it will not duplicate
+  // any blocks already cloned because these are already in VMap.
+  PruningFunctionCloner PFC(ResumeFunc, OldFunc, VMap, ModuleLevelChanges, "",
+                            CodeInfo);
+
+  // First, clone the entry block, and anything recursively reachable from it
+  // until the alloca spill block.
+  const BasicBlock *StartingBB = &OldFunc->getEntryBlock();
+  const Instruction *StartingInst = &StartingBB->front();
+
+  // Clone the entry block, and anything recursively reachable from it.
+  std::vector<const BasicBlock *> CloneWorklist;
+  PFC.CloneBlock(StartingBB, StartingInst->getIterator(), CloneWorklist);
+  while (!CloneWorklist.empty()) {
+    const BasicBlock *BB = CloneWorklist.back();
+    CloneWorklist.pop_back();
+
+    if (BB == AllocaSpillBlock) {
+      // Don't queue any more blocks on this path.
+      std::vector<const BasicBlock *> StopWorklist;
+      PFC.CloneBlock(BB, BB->begin(), StopWorklist);
+      continue;
+    }
+
+    PFC.CloneBlock(BB, BB->begin(), CloneWorklist);
+  }
+
+  // Change the name, may need a better way to specify the desired name...
+  auto ClonedAllocaSpillBlock = cast<BasicBlock>(VMap[AllocaSpillBlock]);
+  ClonedAllocaSpillBlock->setName(Twine("entry") + Twine(NameSuffix));
+
+  // Replace the br from the alloca spill block with a branch to the
+  // ResumeBlock, but use the ResumeBlock from the old func, this will be
+  // remapped later.
+  ClonedAllocaSpillBlock->getTerminator()->eraseFromParent();
+  IRBuilder<> Builder(ClonedAllocaSpillBlock);
+  Builder.CreateBr(const_cast<BasicBlock *>(ResumeBlock));
+
+  // Make the branch to the cloned alloca spill block an unreachable.
+  auto ClonedAllocaSpillPred = cast<BasicBlock>(VMap[AllocaSpillPred]);
+  auto ClonedBrToAllocaSpillBlock =
+      cast<BranchInst>(ClonedAllocaSpillPred->getTerminator());
+  Builder.SetInsertPoint(ClonedBrToAllocaSpillBlock);
+  Builder.CreateUnreachable();
+  ClonedBrToAllocaSpillBlock->eraseFromParent();
+
+  Builder.SetInsertPoint(ClonedAllocaSpillBlock->getFirstInsertionPt());
+
+  // Any Alloca at this point are 'local' to a continuation. If we find an
+  // unmapped alloca while recursively cloning that is reachable from the
+  // resume block then it is local to this continuation and its definition
+  // needs to be cloned into the new entry (cloned alloca spill block).
+  auto HandleLocalAlloca = [&](const BasicBlock &BB) {
+    for (auto &I : BB) {
+      for (auto &Op : I.operands()) {
+        // Only consider alloca that are used.
+        auto *Alloca = dyn_cast<AllocaInst>(Op.get());
+        if (!Alloca || Alloca->use_empty())
+          continue;
+
+        // Local alloca will be mapped the first time they are seen. Local
+        // alloca are any alloca with uses that still exist after the coroutine
+        // frame is built.
+        if (VMap.count(Alloca))
+          continue;
+
+        // Create a copy and setup the mapping.
+        auto NewAlloca = Builder.CreateAlloca(Alloca->getAllocatedType(),
+                                              Alloca->getArraySize(),
+                                              Alloca->getName() + ".local");
+        VMap[Alloca] = NewAlloca;
+
+        // Any uses of alloca will now be remapped to the new alloca.
+      }
+    }
+  };
+
+  // Then clone everything reachable from the resume.
+  const BasicBlock *ResumeBB = ResumeBlock;
+  const Instruction *ResumeInst = &ResumeBB->front();
+  PFC.CloneBlock(ResumeBB, ResumeInst->getIterator(), CloneWorklist);
+  while (!CloneWorklist.empty()) {
+    const BasicBlock *BB = CloneWorklist.back();
+    CloneWorklist.pop_back();
+
+    // Local alloca may be used in the continuation, but defined before it, so
+    // we need to handle local alloca before remapping the block.
+    HandleLocalAlloca(*BB);
+
+    PFC.CloneBlock(BB, BB->begin(), CloneWorklist);
+  }
+
+  const auto RemapFlag = ModuleLevelChanges ? RF_None : RF_NoModuleLevelChanges;
+  // Duplicate the metadata that is attached to the cloned function.
+  // Subprograms/CUs/types that were already mapped to themselves won't be
+  // duplicated.
+  SmallVector<std::pair<unsigned, MDNode *>, 1> MDs;
+  OldFunc->getAllMetadata(MDs);
+  for (auto MD : MDs) {
+    ResumeFunc->addMetadata(MD.first, *MapMetadata(MD.second, VMap, RemapFlag));
+  }
+
+  // Remap operands, etc in the cloned function.
+  auto NewStartingBB =
+      RemapClonedFunction(ResumeFunc, OldFunc, VMap, ModuleLevelChanges);
+
+  // Make the cloned alloca spill block the entry point, this branches to the
+  // resume block to begin the continuation.
+  ClonedAllocaSpillBlock->moveBefore(&ResumeFunc->getEntryBlock());
+
+  // Gather returns for the caller
+  GatherReturns(ResumeFunc, NewStartingBB, Returns);
+}
+
+/// This works like CloneAndPruneFunctionInto, except that it does not clone the
+/// entire function. Instead it starts at an instruction provided by the caller
+/// and copies (and prunes) only the code reachable from that instruction.
+void llvm::CloneAndPruneIntoFromInst(Function *NewFunc, const Function *OldFunc,
+                                     const Instruction *StartingInst,
+                                     ValueToValueMapTy &VMap,
+                                     bool ModuleLevelChanges,
+                                     SmallVectorImpl<ReturnInst *> &Returns,
+                                     const char *NameSuffix,
+                                     ClonedCodeInfo *CodeInfo) {
+  assert(NameSuffix && "NameSuffix cannot be null!");
+
+#ifndef NDEBUG
+  // If the cloning starts at the beginning of the function, verify that
+  // the function arguments are mapped.
+  if (!StartingInst)
+    for (const Argument &II : OldFunc->args())
+      assert(VMap.count(&II) && "No mapping from source argument specified!");
+#endif
+
+  PruningFunctionCloner PFC(NewFunc, OldFunc, VMap, ModuleLevelChanges,
+                            NameSuffix, CodeInfo);
+  const BasicBlock *StartingBB;
+  if (StartingInst)
+    StartingBB = StartingInst->getParent();
+  else {
+    StartingBB = &OldFunc->getEntryBlock();
+    StartingInst = &StartingBB->front();
+  }
+
+  // Clone the entry block, and anything recursively reachable from it.
+  std::vector<const BasicBlock *> CloneWorklist;
+  PFC.CloneBlock(StartingBB, StartingInst->getIterator(), CloneWorklist);
+  while (!CloneWorklist.empty()) {
+    const BasicBlock *BB = CloneWorklist.back();
+    CloneWorklist.pop_back();
+    PFC.CloneBlock(BB, BB->begin(), CloneWorklist);
+  }
+
+  // Remap operands, etc in the cloned function.
+  auto NewStartingBB =
+      RemapClonedFunction(NewFunc, OldFunc, VMap, ModuleLevelChanges);
+
+  // Do simplification on the cloned function.
+  SimplifyClonedFunction(NewFunc, NewStartingBB, VMap, Returns);
+
+  // Gather returns for the caller.
+  GatherReturns(NewFunc, NewStartingBB, Returns);
 }
 
 /// This works exactly like CloneFunctionInto,
